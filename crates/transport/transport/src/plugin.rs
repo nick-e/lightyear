@@ -66,7 +66,7 @@ pub struct PacketAcked {
 impl From<PacketAcked> for ResolvedPacket {
     fn from(event: PacketAcked) -> Self {
         ResolvedPacket {
-            packet_id: event.packet_id,
+            packet_id: event.packet_id.0.into(),
             rtt: Some(event.rtt_sample),
         }
     }
@@ -74,6 +74,10 @@ impl From<PacketAcked> for ResolvedPacket {
 
 /// Event triggered on a [`Transport`] entity when a sent packet is presumed lost
 /// (its acknowledgement did not arrive before the nack timeout).
+///
+/// A lost packet doesn't always mean that the packet never reached the
+/// receiver. A [`PacketAckedLate`] event could fire afterwards if the
+/// acknowledgement for the packet does finally arrive.
 #[derive(EntityEvent, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PacketLost {
     pub entity: Entity,
@@ -83,10 +87,29 @@ pub struct PacketLost {
 impl From<PacketLost> for ResolvedPacket {
     fn from(event: PacketLost) -> Self {
         ResolvedPacket {
-            packet_id: event.packet_id,
+            packet_id: event.packet_id.0.into(),
             rtt: None,
         }
     }
+}
+
+/// Event triggered on a [`Transport`] entity when an acknowledgement arrives
+/// for a packet that was already reported as [`PacketLost`].
+///
+/// The packet was lost, but this event helps differentiate the following
+/// situations:
+///
+/// * The receiver did receive the packet but the acknowledgement took too long.
+/// * The packet was discarded somewhere in transit and the receiver never
+///   received it.
+///
+/// This is important for accurately measuring a network connection's true
+/// packet loss and delay.
+#[derive(EntityEvent, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PacketAckedLate {
+    pub entity: Entity,
+    pub packet_id: PacketId,
+    pub rtt_sample: Duration,
 }
 
 pub struct TransportPlugin;
@@ -169,6 +192,38 @@ impl TransportPlugin {
                                     rtt_sample: *rtt_sample,
                                 });
                             });
+                    });
+                    #[cfg(not(feature = "std"))]
+                    newly_acked_packets
+                        .iter()
+                        .for_each(|(packet_id, rtt_sample)| {
+                            commands.trigger(PacketAcked {
+                                entity,
+                                packet_id: *packet_id,
+                                rtt_sample: *rtt_sample,
+                            });
+                        });
+
+                    // Read the late acks only after the `newly_acked_packets` borrow ends. Both
+                    // slices are owned by the same header manager.
+                    let late_acked_packets =
+                        &transport.packet_manager.header_manager.late_acked_packets;
+                    #[cfg(feature = "metrics")]
+                    if !late_acked_packets.is_empty() {
+                        metrics::counter!("transport/packets_acked_late")
+                            .increment(late_acked_packets.len() as u64);
+                    }
+                    #[cfg(feature = "std")]
+                    par_commands.command_scope(|mut commands| {
+                        late_acked_packets
+                            .iter()
+                            .for_each(|(packet_id, rtt_sample)| {
+                                commands.trigger(PacketAckedLate {
+                                    entity,
+                                    packet_id: *packet_id,
+                                    rtt_sample: *rtt_sample,
+                                });
+                            });
                         commands.trigger(PacketReceived {
                             entity,
                             remote_tick: tick,
@@ -176,10 +231,10 @@ impl TransportPlugin {
                     });
                     #[cfg(not(feature = "std"))]
                     {
-                        newly_acked_packets
+                        late_acked_packets
                             .iter()
                             .for_each(|(packet_id, rtt_sample)| {
-                                commands.trigger(PacketAcked {
+                                commands.trigger(PacketAckedLate {
                                     entity,
                                     packet_id: *packet_id,
                                     rtt_sample: *rtt_sample,
@@ -190,6 +245,11 @@ impl TransportPlugin {
                             remote_tick: tick,
                         });
                     }
+                    transport
+                        .packet_manager
+                        .header_manager
+                        .late_acked_packets
+                        .clear();
 
                     let mut packet_type = header.get_packet_type();
                     if packet_type.is_compressed() {
