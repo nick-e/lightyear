@@ -37,7 +37,9 @@ pub mod prelude {
     pub use crate::ping::manager::{PingConfig, PingManager};
     pub use crate::ping::message::{Ping, Pong};
     pub use crate::plugin::{SyncSystems, TimelineSyncPlugin};
-    pub use crate::timeline::sync::{IsSynced, SyncConfig};
+    pub use crate::timeline::sync::{
+        IsSynced, SyncConfig, SyncTargetTimeline, SyncedTimeline,
+    };
     pub use crate::timeline::{
         DrivingTimeline,
         input::{InputTimeline, InputTimelineConfig},

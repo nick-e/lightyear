@@ -39,6 +39,10 @@ use lightyear_replication::registry::replication::{
 use lightyear_replication::registry::{ComponentError, ComponentKind, ComponentRegistry, LerpFn};
 use tracing::{debug, error, trace, trace_span};
 
+/// Metric key for component confirmations not checked because their tick is not in the local past.
+pub const CONFIRMED_RECEIVE_NOT_PAST_COUNTER: &str =
+    "prediction/rollback/confirmed_receive_not_past";
+
 fn lerp<C: Ease + Clone>(start: C, other: C, t: f32) -> C {
     let curve = EasingCurve::new(start, other, EaseFunction::Linear);
     curve.sample_unchecked(t)
@@ -460,6 +464,8 @@ impl PredictionRegistry {
             );
         }
         if check_mismatch && confirmed_tick >= current_tick {
+            #[cfg(feature = "metrics")]
+            metrics::counter!(CONFIRMED_RECEIVE_NOT_PAST_COUNTER).increment(1);
             trace!(
                 target: "lightyear_debug::prediction",
                 kind = "confirmed_history_future_skip_mismatch",
