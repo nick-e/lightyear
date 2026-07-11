@@ -10,7 +10,11 @@ use crate::predicted_history::{
     handle_local_timeline_shift_prediction_history, prune_confirmed_history,
     prune_history_diff_receiver, snap_to_confirmed_during_rollback, update_prediction_history,
 };
+#[cfg(feature = "metrics")]
+use crate::registry::CONFIRMED_RECEIVE_NOT_PAST_COUNTER;
 use crate::registry::{PredictionRegistry, register_rollback_metadata};
+#[cfg(feature = "metrics")]
+use crate::rollback::CHECKPOINT_FUTURE_DEFERRAL_ATTEMPT_COUNTER;
 use crate::rollback::DisabledDuringRollback;
 use crate::{Predicted, SyncComponent};
 use bevy_app::FixedPreUpdate;
@@ -222,6 +226,20 @@ pub(crate) fn add_prediction_diff_systems<C: SyncComponent + RepliconDiffable>(a
 
 impl Plugin for PredictionPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(feature = "metrics")]
+        {
+            metrics::describe_counter!(
+                CONFIRMED_RECEIVE_NOT_PAST_COUNTER,
+                metrics::Unit::Count,
+                "Component confirmations not mismatch-checked because their authoritative tick was not before the local tick"
+            );
+            metrics::describe_counter!(
+                CHECKPOINT_FUTURE_DEFERRAL_ATTEMPT_COUNTER,
+                metrics::Unit::Count,
+                "Checkpoint scans whose authoritative tick was after the local tick, so the scan fell back to an earlier completed checkpoint"
+            );
+        }
+
         // RESOURCES
         app.init_resource::<PredictionRegistry>();
         app.init_resource::<LastConfirmedInput>();

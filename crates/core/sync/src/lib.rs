@@ -41,7 +41,9 @@ pub mod prelude {
         InputTimelineConfig, LocalTimelineSync, PREDICTION_WINDOW_HYSTERESIS_TICKS,
         PredictionWindowWait, SyncedLocalTimeline,
     };
-    pub use crate::timeline::sync::{P2PTimelineDiverged, SyncConfig, TimelineSync};
+    pub use crate::timeline::sync::{
+        P2PTimelineDiverged, SyncConfig, SyncTargetTimeline, TimelineSync,
+    };
 
     #[cfg(feature = "client")]
     pub mod client {

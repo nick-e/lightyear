@@ -75,6 +75,10 @@ use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use tracing::{debug, debug_span, error, info, trace, trace_span, warn};
 
+/// Metric key for checkpoint scans whose authoritative tick was after the local tick.
+pub const CHECKPOINT_FUTURE_DEFERRAL_ATTEMPT_COUNTER: &str =
+    "prediction/rollback/checkpoint_future_deferral_attempt";
+
 /// Responsible for re-running the FixedMain schedule a fixed number of times in order
 /// to rollback the simulation to a previous state.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, ScheduleLabel)]
@@ -365,9 +369,13 @@ fn check_rollback(
     let server_confirmed_tick = checkpoints.last_confirmed_tick();
     let candidate_confirmed_tick = match server_confirmed_tick {
         Some(confirmed_tick) if confirmed_tick <= tick => Some(confirmed_tick),
-        Some(_) => checkpoints
-            .latest_completed_at_or_before(&server_mutate_ticks, tick)
-            .map(|checkpoint| checkpoint.tick),
+        Some(_) => {
+            #[cfg(feature = "metrics")]
+            metrics::counter!(CHECKPOINT_FUTURE_DEFERRAL_ATTEMPT_COUNTER).increment(1);
+            checkpoints
+                .latest_completed_at_or_before(&server_mutate_ticks, tick)
+                .map(|checkpoint| checkpoint.tick)
+        }
         None => None,
     };
 

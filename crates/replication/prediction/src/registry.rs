@@ -41,6 +41,13 @@ use lightyear_utils::ecs::{get_component_unchecked, get_component_unchecked_mut}
 use std::sync::OnceLock;
 use tracing::{debug, error, trace, trace_span};
 
+/// Metric key for component confirmations not checked because their tick is not in the local past.
+///
+/// Never incremented since upstream moved every mismatch decision out of the receive path and
+/// into the completed-checkpoint scan: there is no receive-time check left to skip.
+pub const CONFIRMED_RECEIVE_NOT_PAST_COUNTER: &str =
+    "prediction/rollback/confirmed_receive_not_past";
+
 fn lerp<C: Ease + Clone>(start: C, other: C, t: f32) -> C {
     let curve = EasingCurve::new(start, other, EaseFunction::Linear);
     curve.sample_unchecked(t)
