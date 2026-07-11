@@ -800,21 +800,23 @@ impl LinkConditionerConfig {
     /// ethernet connection in New York, New York USA to a WiFi connection
     /// in Reno, Nevada USA.
     ///
-    /// This was created using [`fit`](Self::fit) provided with 62,608
-    /// packets (~10 minutes) of real network data and an `rtt_overhead` of
-    /// 33.5 ms.
+    /// This was created using [`fit`](Self::fit) provided with 15,609 packets
+    /// (~4.3 minutes) from connection 2386 in authority bundle
+    /// `e5f65104-5e92-45ac-9265-d68f4c5d58de` of the 2026-07-11 play session
+    /// `4f499ee0-c9a7-4c0b-9df1-0e7eecd8938f`. The fit used the 33.440 ms
+    /// `rtt_overhead` measured by that process.
     ///
     /// This preset is one direction. To simulate the full pair, install
     /// this on the peer receiving the New York to Reno direction and
     /// [`reno_to_ny`](Self::reno_to_ny) on the other peer.
     pub fn ny_to_reno() -> Self {
         Self {
-            incoming_latency: Duration::from_micros(49_695),
-            incoming_jitter: Duration::from_micros(5_141),
+            incoming_latency: Duration::from_micros(41_750),
+            incoming_jitter: Duration::from_micros(9_275),
             good_loss: 0.0,
-            bad_loss: 1.0,
-            good_to_bad: 0.000_483_582_4,
-            bad_to_good: 0.131_578_95,
+            bad_loss: 0.977_027_2,
+            good_to_bad: 0.003_474_015_7,
+            bad_to_good: 0.296_334_8,
         }
     }
 
@@ -822,21 +824,23 @@ impl LinkConditionerConfig {
     /// WiFi connection in Reno, Nevada USA to an ethernet connection in
     /// New York, New York USA.
     ///
-    /// This was created using [`fit`](Self::fit) provided with 34,829
-    /// packets (~10 minutes) of real network data and an `rtt_overhead` of
-    /// 33.5 ms.
+    /// This was created using [`fit`](Self::fit) provided with 15,411 packets
+    /// (~4.4 minutes) from connection 1100 in Reno bundle
+    /// `20c7aeaf-60ba-45e4-9b33-2f44c5949aef` of the 2026-07-11 play session
+    /// `4f499ee0-c9a7-4c0b-9df1-0e7eecd8938f`. The fit used the 34.012 ms
+    /// `rtt_overhead` measured by that process.
     ///
     /// This preset is one direction. To simulate the full pair, install
     /// this on the peer receiving the Reno to New York direction and
     /// [`ny_to_reno`](Self::ny_to_reno) on the other peer.
     pub fn reno_to_ny() -> Self {
         Self {
-            incoming_latency: Duration::from_micros(51_411),
-            incoming_jitter: Duration::from_micros(14_481),
+            incoming_latency: Duration::from_micros(42_389),
+            incoming_jitter: Duration::from_micros(5_390),
             good_loss: 0.0,
             bad_loss: 1.0,
-            good_to_bad: 0.055_427_25,
-            bad_to_good: 0.764_980_85,
+            good_to_bad: 0.002_252_103_3,
+            bad_to_good: 0.242_857_14,
         }
     }
 
@@ -844,21 +848,23 @@ impl LinkConditionerConfig {
     /// ethernet connection in New York, New York USA to a WiFi connection
     /// in Pahrump, Nevada USA.
     ///
-    /// This was created using [`fit`](Self::fit) provided with 53,101
-    /// packets (~8.5 minutes) of real network data and an `rtt_overhead`
-    /// of 33.5 ms.
+    /// This was created using [`fit`](Self::fit) provided with 23,699 packets
+    /// (~6.6 minutes) from connection 2364 in authority bundle
+    /// `e5f65104-5e92-45ac-9265-d68f4c5d58de` of the 2026-07-11 play session
+    /// `4f499ee0-c9a7-4c0b-9df1-0e7eecd8938f`. The fit used the 33.440 ms
+    /// `rtt_overhead` measured by that process.
     ///
     /// This preset is one direction. To simulate the full pair, install
     /// this on the peer receiving the New York to Pahrump direction and
     /// [`pahrump_to_ny`](Self::pahrump_to_ny) on the other peer.
     pub fn ny_to_pahrump() -> Self {
         Self {
-            incoming_latency: Duration::from_micros(33_663),
-            incoming_jitter: Duration::from_micros(8_985),
+            incoming_latency: Duration::from_micros(33_464),
+            incoming_jitter: Duration::from_micros(4_896),
             good_loss: 0.0,
-            bad_loss: 0.984_078_6,
-            good_to_bad: 0.000_684_733_44,
-            bad_to_good: 0.061_043_583,
+            bad_loss: 0.961_367_13,
+            good_to_bad: 0.004_351_793,
+            bad_to_good: 0.283_360_66,
         }
     }
 
@@ -866,21 +872,25 @@ impl LinkConditionerConfig {
     /// WiFi connection in Pahrump, Nevada USA to an ethernet connection in
     /// New York, New York USA.
     ///
-    /// This was created using [`fit`](Self::fit) provided with 39,043
-    /// packets (~8.5 minutes) of real network data and an `rtt_overhead`
-    /// of 33.5 ms.
+    /// This was created using [`fit`](Self::fit) provided with 35,388 packets
+    /// (~6.6 minutes) from connection 1165 in Pahrump bundle
+    /// `0aa35018-e2ce-403e-a627-aaff7efe0ad5` of the 2026-07-11 play session
+    /// `4f499ee0-c9a7-4c0b-9df1-0e7eecd8938f`. That process did not record an
+    /// overhead measurement, so the fit used the 34.012 ms `rtt_overhead`
+    /// measured by the contemporaneous Windows Reno bundle
+    /// `20c7aeaf-60ba-45e4-9b33-2f44c5949aef`.
     ///
     /// This preset is one direction. To simulate the full pair, install
     /// this on the peer receiving the Pahrump to New York direction and
     /// [`ny_to_pahrump`](Self::ny_to_pahrump) on the other peer.
     pub fn pahrump_to_ny() -> Self {
         Self {
-            incoming_latency: Duration::from_micros(39_821),
-            incoming_jitter: Duration::from_micros(14_321),
+            incoming_latency: Duration::from_micros(32_700),
+            incoming_jitter: Duration::from_micros(6_124),
             good_loss: 0.0,
-            bad_loss: 1.0,
-            good_to_bad: 0.068_795_934,
-            bad_to_good: 0.591_445_45,
+            bad_loss: 0.996_156_7,
+            good_to_bad: 0.001_439_558,
+            bad_to_good: 0.146_720_56,
         }
     }
 }
