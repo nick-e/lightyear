@@ -24,6 +24,7 @@ use lightyear_connection::host::HostClient;
 use lightyear_connection::prelude::Disconnected;
 use lightyear_core::prelude::LocalTimeline;
 use lightyear_core::tick::Tick;
+use lightyear_link::prelude::ResolvedPacket;
 use lightyear_link::{Link, LinkPlugin, LinkSystems, Linked};
 use lightyear_serde::reader::{ReadInteger, Reader};
 use lightyear_serde::{SerializationError, ToBytes};
@@ -54,19 +55,51 @@ pub struct PacketReceived {
 }
 
 /// Event triggered on a [`Transport`] entity when a sent packet is acknowledged.
-#[derive(EntityEvent)]
+#[derive(EntityEvent, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PacketAcked {
     pub entity: Entity,
     pub packet_id: u32,
     pub rtt_sample: Duration,
 }
 
+impl From<PacketAcked> for ResolvedPacket {
+    fn from(event: PacketAcked) -> Self {
+        ResolvedPacket {
+            packet_id: event.packet_id,
+            rtt: Some(event.rtt_sample),
+        }
+    }
+}
+
 /// Event triggered on a [`Transport`] entity when a sent packet is presumed lost
-/// (its acknowledgement did not arrive before the nack timeout).
-#[derive(EntityEvent)]
+/// because its acknowledgement did not arrive before the nack timeout.
+///
+/// [`PacketAckedLate`] may follow if the acknowledgement eventually arrives.
+#[derive(EntityEvent, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PacketLost {
     pub entity: Entity,
     pub packet_id: u32,
+}
+
+impl From<PacketLost> for ResolvedPacket {
+    fn from(event: PacketLost) -> Self {
+        ResolvedPacket {
+            packet_id: event.packet_id,
+            rtt: None,
+        }
+    }
+}
+
+/// Event triggered on a [`Transport`] entity when an acknowledgement arrives
+/// for a packet that was already reported as [`PacketLost`].
+///
+/// This event distinguishes a delayed acknowledgement from a packet that never
+/// reached the receiver.
+#[derive(EntityEvent, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PacketAckedLate {
+    pub entity: Entity,
+    pub packet_id: u32,
+    pub rtt_sample: Duration,
 }
 
 pub struct TransportPlugin;
@@ -198,11 +231,26 @@ impl TransportPlugin {
                             .packet_manager
                             .header_manager
                             .process_recv_packet_header(&header, time.elapsed());
+                        let late_acked_packets = core::mem::take(
+                            &mut transport.packet_manager.header_manager.late_acked_packets,
+                        );
+                        #[cfg(feature = "metrics")]
+                        if !late_acked_packets.is_empty() {
+                            metrics::counter!("transport/packets_acked_late")
+                                .increment(late_acked_packets.len() as u64);
+                        }
 
                         #[cfg(feature = "std")]
                         par_commands.command_scope(|mut commands| {
                             newly_acked_packets.iter().for_each(|(packet_id, rtt_sample)| {
                                 commands.trigger(PacketAcked {
+                                    entity,
+                                    packet_id: packet_id.0,
+                                    rtt_sample: *rtt_sample,
+                                });
+                            });
+                            late_acked_packets.iter().for_each(|(packet_id, rtt_sample)| {
+                                commands.trigger(PacketAckedLate {
                                     entity,
                                     packet_id: packet_id.0,
                                     rtt_sample: *rtt_sample,
@@ -214,6 +262,13 @@ impl TransportPlugin {
                         {
                             newly_acked_packets.iter().for_each(|(packet_id, rtt_sample)| {
                                 commands.trigger(PacketAcked {
+                                    entity,
+                                    packet_id: packet_id.0,
+                                    rtt_sample: *rtt_sample,
+                                });
+                            });
+                            late_acked_packets.iter().for_each(|(packet_id, rtt_sample)| {
+                                commands.trigger(PacketAckedLate {
                                     entity,
                                     packet_id: packet_id.0,
                                     rtt_sample: *rtt_sample,
