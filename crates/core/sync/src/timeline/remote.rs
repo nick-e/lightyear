@@ -275,7 +275,12 @@ pub(crate) fn reset_received_packet_remote_timeline(
 
 impl SyncTargetTimeline for RemoteTimeline {
     fn current_estimate(&self) -> TickInstant {
-        self.now + self.offset
+        let smoothed_estimate = self.now + self.offset;
+        self.last_received_tick
+            .map(TickInstant::from)
+            .map_or(smoothed_estimate, |arrival_floor| {
+                smoothed_estimate.max(arrival_floor)
+            })
     }
 
     fn is_initialized(&self) -> bool {
@@ -284,5 +289,30 @@ impl SyncTargetTimeline for RemoteTimeline {
 
     fn received_packet(&self) -> bool {
         self.received_packet
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimate_cannot_precede_latest_received_tick() {
+        let mut timeline = RemoteTimeline::default();
+        timeline.set_now(TickInstant::from(Tick(100)));
+        timeline.context.offset = TickDelta::from_i32(-20);
+        timeline.context.last_received_tick = Some(Tick(95));
+
+        assert_eq!(timeline.current_estimate(), TickInstant::from(Tick(95)));
+    }
+
+    #[test]
+    fn estimate_keeps_smoothed_lead_over_latest_received_tick() {
+        let mut timeline = RemoteTimeline::default();
+        timeline.set_now(TickInstant::from(Tick(100)));
+        timeline.context.offset = TickDelta::from_i32(10);
+        timeline.context.last_received_tick = Some(Tick(105));
+
+        assert_eq!(timeline.current_estimate(), TickInstant::from(Tick(110)));
     }
 }
