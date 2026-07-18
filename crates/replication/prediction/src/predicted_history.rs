@@ -320,6 +320,53 @@ pub(crate) fn apply_component_removal_predicted<C: Component>(
     }
 }
 
+/// Ensures local rollback state has predicted history without confirmed state.
+///
+/// This is the non-networked counterpart to [`add_prediction_history`]. It applies the same
+/// eligibility rules, including the [`IsResource`] check, but never seeds [`ConfirmedHistory<C>`]
+/// because no authoritative value is ever received for `C`.
+pub(crate) fn add_local_prediction_history<C: Component + Clone>(
+    trigger: On<
+        Add,
+        (
+            C,
+            Predicted,
+            PreSpawned,
+            DeterministicPredicted,
+            CatchUpGated,
+        ),
+    >,
+    query: Query<(
+        Has<C>,
+        Has<Predicted>,
+        Has<PreSpawned>,
+        Has<DeterministicPredicted>,
+        Has<CatchUpGated>,
+        Has<IsResource>,
+    )>,
+    mut commands: Commands,
+) {
+    let Ok((has_component, predicted, prespawned, deterministic, catchup_gated, is_resource)) =
+        query.get(trigger.entity)
+    else {
+        return;
+    };
+    if !catchup_gated
+        && !(has_component && (predicted || prespawned || deterministic || is_resource))
+    {
+        return;
+    }
+    let entity = trigger.entity;
+    commands.queue(move |world: &mut World| {
+        let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+            return;
+        };
+        if !entity_mut.contains::<PredictionHistory<C>>() {
+            entity_mut.insert(PredictionHistory::<C>::default());
+        }
+    });
+}
+
 /// When `C` or one of [`Predicted`], [`PreSpawned`], [`DeterministicPredicted`], or
 /// [`CatchUpGated`] is added to an entity, ensure [`PredictionHistory<C>`] is present for predicted
 /// entities and resource entities. [`IsResource`] is an eligibility check rather than a trigger:
@@ -640,8 +687,11 @@ mod tests {
     use bevy_app::{App, Update};
     use bevy_ecs::entity_disabling::Disabled;
     use bevy_ecs::system::RunSystemOnce;
+    use bevy_replicon::client::confirm_history::ConfirmHistory;
+    use bevy_replicon::prelude::RepliconTick;
     use bevy_replicon::shared::replication::diff::diff_index::DiffIndex;
     use lightyear_core::prelude::FrameInterpolationHistory;
+    use lightyear_replication::checkpoint::ReplicationCheckpointMap;
     use lightyear_sync::prelude::LocalTimelineSync;
     use lightyear_sync::timeline::input::InputDelayConfig;
     use serde::{Deserialize, Serialize};
@@ -651,6 +701,9 @@ mod tests {
 
     #[derive(Component, Clone, Debug, Deserialize, PartialEq, Serialize)]
     struct TestDiffValue(u32);
+
+    #[derive(Component, Clone, Debug, PartialEq)]
+    struct LocalValue(u32);
 
     impl RepliconDiffable for TestDiffValue {
         type Diff = u32;
@@ -794,6 +847,34 @@ mod tests {
             .get::<ConfirmedHistory<TestValue>>(entity)
             .unwrap();
         assert_eq!(confirmed_history.len(), 3);
+    }
+
+    #[test]
+    fn local_history_added_after_prediction_init_has_no_confirmed_seed() {
+        let mut app = App::new();
+        let replicon_tick = RepliconTick::new(7);
+        let mut checkpoints = ReplicationCheckpointMap::default();
+        checkpoints.record(replicon_tick, Tick(11));
+        app.insert_resource(checkpoints);
+        app.add_observer(add_local_prediction_history::<LocalValue>);
+
+        let entity = app
+            .world_mut()
+            .spawn((Predicted, ConfirmHistory::new(replicon_tick)))
+            .id();
+        app.world_mut().entity_mut(entity).insert(LocalValue(3));
+        app.update();
+
+        assert!(
+            app.world()
+                .entity(entity)
+                .contains::<PredictionHistory<LocalValue>>()
+        );
+        assert!(
+            !app.world()
+                .entity(entity)
+                .contains::<ConfirmedHistory<LocalValue>>()
+        );
     }
 
     #[test]
