@@ -44,6 +44,7 @@ use avian3d::{
 use bevy_app::{App, FixedPostUpdate, PreUpdate};
 use bevy_ecs::prelude::*;
 use bevy_time::Time;
+use lightyear_core::prelude::{LocalTimeline, Tick};
 use lightyear_core::timeline::is_in_rollback;
 use lightyear_prediction::plugin::PredictionSystems;
 use lightyear_prediction::prelude::{
@@ -141,6 +142,17 @@ struct ColliderRollbackHistories {
     enlarged_aabb: PredictionHistory<EnlargedAabb>,
 }
 
+impl ColliderRollbackHistories {
+    /// Builds the three histories already recording that the collider did not exist at `tick`.
+    fn absent_before(tick: Tick) -> Self {
+        let mut histories = Self::default();
+        histories.proxy_key.add_remove(tick);
+        histories.aabb.add_remove(tick);
+        histories.enlarged_aabb.add_remove(tick);
+        histories
+    }
+}
+
 /// Registers Avian state that persists from one physics tick to the next.
 ///
 /// Registering `ColliderTrees` and `MovedProxies` directly would be correct. The custom aggregate
@@ -183,8 +195,10 @@ pub(super) fn register_rollback(app: &mut App) {
     backfill_existing_collider_rollback_histories(app.world_mut());
     app.add_systems(
         FixedPostUpdate,
-        record_collider_broad_phase_for_rollback
-            .after(PhysicsSystems::StepSimulation)
+        (
+            record_collider_broad_phase_for_rollback.after(PhysicsSystems::StepSimulation),
+            seed_collider_history_absence,
+        )
             .before(PredictionSystems::UpdateHistory),
     );
     app.add_systems(
@@ -328,14 +342,72 @@ fn add_collider_rollback_histories(
             With<EnlargedAabb>,
         ),
     >,
+    // Optional so a collider added before Lightyear inserts its timeline still gets histories;
+    // `seed_collider_history_absence` seeds those once the timeline exists.
+    timeline: Option<Res<LocalTimeline>>,
     mut commands: Commands,
 ) {
     if colliders.get(trigger.entity).is_ok() {
-        commands
-            .entity(trigger.entity)
-            .insert_if_new(ColliderRollbackHistories::default());
+        // Seeded here rather than only in `seed_collider_history_absence` because the deferred
+        // insert can land between that system and `PredictionSystems::UpdateHistory`, which would
+        // let the first recorded value reach an unseeded history.
+        let histories = match timeline {
+            Some(timeline) => {
+                ColliderRollbackHistories::absent_before(timeline.tick() - ABSENCE_SEED_TICKS)
+            }
+            None => ColliderRollbackHistories::default(),
+        };
+        commands.entity(trigger.entity).insert_if_new(histories);
     }
 }
+
+/// Records that a collider's broad-phase state was absent before Avian registered it.
+///
+/// `update_prediction_history` records a component only once it exists and changes, so these three
+/// histories begin at the tick Avian assigned the proxy. A rollback to any earlier tick finds no
+/// entry at or before its target, so `prepare_rollback` keeps the live proxy key while
+/// `restore_collider_broad_phase` rewinds the tree to a snapshot that has no such proxy, and
+/// `update_moved_collider_aabbs` then indexes a slot that does not exist. Writing an explicit
+/// removal ahead of the first recorded value gives that rollback something true to restore: the
+/// components are stripped, and Avian re-registers the collider during replay.
+///
+/// The seed is placed further back than any rollback can target. A deeper tick is safe because
+/// `HistoryBuffer::clear_until_tick` keeps the newest entry at or before the horizon and relabels
+/// it forward, so the seed converges to the horizon on its own and is dropped once the collider is
+/// older than the rollback window.
+fn seed_collider_history_absence(
+    timeline: Option<Res<LocalTimeline>>,
+    mut colliders: Query<(
+        &mut PredictionHistory<ColliderTreeProxyKey>,
+        &mut PredictionHistory<ColliderAabb>,
+        &mut PredictionHistory<EnlargedAabb>,
+    )>,
+) {
+    let Some(timeline) = timeline else {
+        return;
+    };
+    let seed_tick = timeline.tick() - ABSENCE_SEED_TICKS;
+    for (mut proxy_key, mut aabb, mut enlarged_aabb) in colliders.iter_mut() {
+        seed_absence(&mut proxy_key, seed_tick);
+        seed_absence(&mut aabb, seed_tick);
+        seed_absence(&mut enlarged_aabb, seed_tick);
+    }
+}
+
+/// Writes one removal into a history that has never recorded a value.
+///
+/// Takes the change-detection wrapper so reading the length does not mark the history changed.
+fn seed_absence<C>(history: &mut Mut<PredictionHistory<C>>, tick: Tick) {
+    if history.len() == 0 {
+        history.add_remove(tick);
+    }
+}
+
+/// How far ahead of a collider's first recorded value its absence is written.
+///
+/// Any value above the largest reachable `max_rollback_ticks` works, because the seed is relabeled
+/// forward to the rollback horizon as soon as history pruning runs.
+const ABSENCE_SEED_TICKS: u32 = 64;
 
 /// Adds rollback histories for colliders that existed before rollback registration.
 ///

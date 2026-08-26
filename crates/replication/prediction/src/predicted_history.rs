@@ -320,53 +320,6 @@ pub(crate) fn apply_component_removal_predicted<C: Component>(
     }
 }
 
-/// Ensures local rollback state has predicted history without confirmed state.
-///
-/// This is the non-networked counterpart to [`add_prediction_history`]. It applies the same
-/// eligibility rules, including the [`IsResource`] check, but never seeds [`ConfirmedHistory<C>`]
-/// because no authoritative value is ever received for `C`.
-pub(crate) fn add_local_prediction_history<C: Component + Clone>(
-    trigger: On<
-        Add,
-        (
-            C,
-            Predicted,
-            PreSpawned,
-            DeterministicPredicted,
-            CatchUpGated,
-        ),
-    >,
-    query: Query<(
-        Has<C>,
-        Has<Predicted>,
-        Has<PreSpawned>,
-        Has<DeterministicPredicted>,
-        Has<CatchUpGated>,
-        Has<IsResource>,
-    )>,
-    mut commands: Commands,
-) {
-    let Ok((has_component, predicted, prespawned, deterministic, catchup_gated, is_resource)) =
-        query.get(trigger.entity)
-    else {
-        return;
-    };
-    if !catchup_gated
-        && !(has_component && (predicted || prespawned || deterministic || is_resource))
-    {
-        return;
-    }
-    let entity = trigger.entity;
-    commands.queue(move |world: &mut World| {
-        let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
-            return;
-        };
-        if !entity_mut.contains::<PredictionHistory<C>>() {
-            entity_mut.insert(PredictionHistory::<C>::default());
-        }
-    });
-}
-
 /// When `C` or one of [`Predicted`], [`PreSpawned`], [`DeterministicPredicted`], or
 /// [`CatchUpGated`] is added to an entity, ensure [`PredictionHistory<C>`] is present for predicted
 /// entities and resource entities. [`IsResource`] is an eligibility check rather than a trigger:
@@ -856,7 +809,7 @@ mod tests {
         let mut checkpoints = ReplicationCheckpointMap::default();
         checkpoints.record(replicon_tick, Tick(11));
         app.insert_resource(checkpoints);
-        app.add_observer(add_local_prediction_history::<LocalValue>);
+        app.add_observer(add_prediction_history::<LocalValue>);
 
         let entity = app
             .world_mut()

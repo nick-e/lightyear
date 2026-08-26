@@ -108,6 +108,17 @@ pub struct ChannelSettings {
     /// message has already been admitted, its remaining fragments are also retained to avoid
     /// guaranteeing an incomplete local send.
     pub retry_unsent_messages: bool,
+    /// Whether a dedicated system outside the message plugin consumes this
+    /// channel's received payloads.
+    ///
+    /// The generic message-receive system drains every channel receiver on a
+    /// transport and parses each payload as a net-id-prefixed message. A
+    /// channel whose payloads are raw bytes for another consumer (for example
+    /// the replicon replication bridge) sets this so that parse never runs.
+    /// Received payloads stay buffered in the channel receiver until the
+    /// external consumer reads them, even while that consumer is not yet
+    /// installed on the connection entity.
+    pub external_receive: bool,
     /// Timeline that controls when received messages and events become visible.
     ///
     /// `None` delivers immediately on the local timeline. Prefer configuring
@@ -123,6 +134,7 @@ impl Default for ChannelSettings {
             send_frequency: Duration::default(),
             priority: 1.0,
             retry_unsent_messages: true,
+            external_receive: false,
             timeline: None,
         }
     }

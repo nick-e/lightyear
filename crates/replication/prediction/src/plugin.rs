@@ -4,9 +4,9 @@ use crate::despawn::{PredictionDisable, finalize_deterministic_despawns};
 use crate::diagnostics::PredictionDiagnosticsPlugin;
 use crate::manager::{LastConfirmedInput, PredictionManager};
 use crate::predicted_history::{
-    PredictionHistory, add_history_diff_receiver, add_local_prediction_history,
-    add_prediction_history, apply_component_removal_predicted,
-    backfill_confirmed_history_on_predicted, handle_local_timeline_shift_history_diff_receiver,
+    PredictionHistory, add_history_diff_receiver, add_prediction_history,
+    apply_component_removal_predicted, backfill_confirmed_history_on_predicted,
+    handle_local_timeline_shift_history_diff_receiver,
     handle_local_timeline_shift_prediction_history, prune_confirmed_history,
     prune_history_diff_receiver, snap_to_confirmed_during_rollback, update_prediction_history,
 };
@@ -141,7 +141,7 @@ pub fn add_non_networked_rollback_systems<C: Component<Mutability = Mutable> + C
         register_rollback_metadata::<C>(app, prediction_history_id, confirmed_history_id);
     }
     app.add_observer(apply_component_removal_predicted::<C>);
-    app.add_observer(add_local_prediction_history::<C>);
+    app.add_observer(add_prediction_history::<C>);
     // Without this observer, the component's `PredictionHistory<C>` buffer
     // would not get its tick values shifted on timeline-sync, so any
     // history entries accumulated pre-sync would point to stale

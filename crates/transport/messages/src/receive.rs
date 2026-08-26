@@ -663,13 +663,21 @@ impl MessagePlugin {
                 } else {
                     transport.channel_receives_mut().try_for_each(|channel_receive| {
                             let channel_kind = channel_receive.channel_kind();
+                            let settings = channel_registry.settings(channel_kind);
+                            // An externally received channel carries raw payloads for a
+                            // dedicated consumer (for example the replicon bridge), not
+                            // net-id-prefixed messages. Reading it here would destroy
+                            // payloads that arrived before that consumer's components
+                            // were installed on this entity, so leave them buffered.
+                            if settings.is_some_and(|settings| settings.external_receive) {
+                                return Ok(());
+                            }
                             let channel_name = channel_registry.get_name_from_kind(&channel_kind);
                             while let Some((tick, bytes, message_id)) =
                                 channel_receive.read_message()
                             {
-                                let target_timeline = channel_registry
-                                    .settings(channel_kind)
-                                    .and_then(|settings| settings.timeline);
+                                let target_timeline =
+                                    settings.and_then(|settings| settings.timeline);
                                 Self::receive_message_bytes(
                                     bytes,
                                     &registry,

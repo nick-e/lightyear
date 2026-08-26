@@ -52,6 +52,11 @@ impl Plugin for RepliconChannelRegistrationPlugin {
         app.add_channel::<RepliconUpdatesChannel>(ChannelSettings {
             mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
             priority: 10.0,
+            // Replicon payloads are raw bytes drained by the replicon bridge,
+            // not net-id-prefixed messages. Without this, the generic message
+            // drain destroys any payload that arrives before the bridge's
+            // marker components are on the connection entity.
+            external_receive: true,
             ..Default::default()
         })
         .add_direction(NetworkDirection::Bidirectional);
@@ -64,6 +69,7 @@ impl Plugin for RepliconChannelRegistrationPlugin {
             priority: 1.0,
             // A later mutation contains fresher component state, so do not build a stale backlog.
             retry_unsent_messages: false,
+            external_receive: true,
             ..Default::default()
         })
         .add_direction(NetworkDirection::Bidirectional);
@@ -73,6 +79,7 @@ impl Plugin for RepliconChannelRegistrationPlugin {
         app.add_channel::<RepliconMutationAcksChannel>(ChannelSettings {
             mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
             priority: 10.0,
+            external_receive: true,
             ..Default::default()
         })
         .add_direction(NetworkDirection::Bidirectional);

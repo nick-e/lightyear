@@ -32,7 +32,7 @@ pub enum InputTarget {
     /// This target is not valid for direct P2P input because input-only P2P Links do not have a
     /// replication stream that can populate their entity maps. Use [`InputTarget::PreSpawned`]
     /// for P2P targets.
-    Entity(Entity),
+    Entity(#[serde(with = "bevy_replicon::compact_entity")] Entity),
     /// The input is for a prespawned entity.
     /// We want the client to be able to send inputs for a prespawned entity before it gets matched with a server entity.
     /// To achieve this, the client sends the PreSpawned hash and the server will map it to the correct server entity.
