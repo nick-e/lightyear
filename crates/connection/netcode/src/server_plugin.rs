@@ -167,6 +167,16 @@ impl NetcodeServer {
         self.inner.set_connection_request_handler(handler);
     }
 
+    /// Replaces the private key connect tokens are checked against, for a
+    /// server that has to refuse every token it has already handed out.
+    ///
+    /// Rotating in place rather than rebuilding the component is what keeps the
+    /// connections this server already has: see
+    /// [`Server::set_private_key`](crate::server::Server::set_private_key).
+    pub fn set_private_key(&mut self, private_key: Key) {
+        self.inner.set_private_key(private_key);
+    }
+
     /// Clears the Netcode runtime state while preserving this server's configuration.
     ///
     /// This is invoked automatically when the server enters [`Stopped`].

@@ -495,6 +495,20 @@ impl<Ctx> Server<Ctx> {
         self.cfg.connection_request_handler = handler;
     }
 
+    /// Replaces the private key this server decrypts connect tokens with, and
+    /// signs the ones [`Server::token`] mints from here on.
+    ///
+    /// Every token issued under the old key stops being accepted, since the
+    /// receive path reads this field to decrypt a connection request. Nothing
+    /// else changes: connected clients hold session keys negotiated during
+    /// their own challenge and keep running, and no packet counter, challenge
+    /// key, or connection is touched. That is the difference from
+    /// [`reset`](Self::reset), which leaves this key alone and clears
+    /// everything else.
+    pub fn set_private_key(&mut self, private_key: Key) {
+        self.private_key = private_key;
+    }
+
     /// Clears all connection and pending packet state so this server can be started again.
     ///
     /// Configuration, callback context, elapsed time, and packet sequence counters are preserved.
@@ -1447,6 +1461,46 @@ mod tests {
 
         assert!(world.get::<Connecting>(client).is_some());
         assert!(server.conn_cache.find_by_entity(&client).is_some());
+    }
+
+    /// Rotating the key changes what the server signs with, which is what
+    /// makes a rotation refuse every token already handed out: a peer holding
+    /// one signed under the old key can no longer have its connection request
+    /// decrypted, and only tokens minted after the rotation can.
+    #[test]
+    fn rotating_the_private_key_resigns_the_tokens_minted_after_it() {
+        let rotated: Key = [0x77; PRIVATE_KEY_BYTES];
+        let server_addr = SocketAddr::from(([127, 0, 0, 1], 5000));
+        let mut server = Server::new(TEST_PROTOCOL_ID, TEST_PRIVATE_KEY).unwrap();
+
+        server.set_private_key(rotated);
+        let token = server.token(1, server_addr).generate().unwrap();
+
+        let mut under_rotated = token.private_data;
+        assert!(
+            crate::token::ConnectTokenPrivate::decrypt(
+                &mut under_rotated,
+                TEST_PROTOCOL_ID,
+                token.expire_timestamp(),
+                token.nonce,
+                &rotated,
+            )
+            .is_ok(),
+            "a token minted after the rotation was not signed with the rotated key",
+        );
+
+        let mut under_original = token.private_data;
+        assert!(
+            crate::token::ConnectTokenPrivate::decrypt(
+                &mut under_original,
+                TEST_PROTOCOL_ID,
+                token.expire_timestamp(),
+                token.nonce,
+                &TEST_PRIVATE_KEY,
+            )
+            .is_err(),
+            "the key the server started on still opens a token minted after the rotation",
+        );
     }
 
     #[test]
