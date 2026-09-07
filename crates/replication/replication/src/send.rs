@@ -521,6 +521,32 @@ impl<T: ReplicationTargetT> ReplicationTarget<T> {
         self.mode.is_visible_for(client, remote)
     }
 
+    /// The peers this target names, or `None` when its mode names link entities
+    /// instead.
+    ///
+    /// The four modes that return `None` are `SingleSender`, `SingleClient`,
+    /// `Sender`, and `Manual`. The first two resolve a single connection at send
+    /// time and the last two carry `Entity` values, so none of them can answer a
+    /// question asked about a [`PeerId`].
+    ///
+    /// Exists because [`mode`](Self::mode) is private and a caller outside this
+    /// crate cannot otherwise ask which peers a target covers. Returning the
+    /// [`NetworkTarget`] rather than the [`ReplicationMode`] keeps the two
+    /// server-gated variants out of the caller's `match`, and returning a
+    /// reference lets a caller both test membership with
+    /// [`Target::targets`](lightyear_connection::network_target::Target::targets)
+    /// and store the value.
+    pub fn network_target(&self) -> Option<&NetworkTarget> {
+        match &self.mode {
+            #[cfg(feature = "server")]
+            ReplicationMode::SingleServer(target) | ReplicationMode::Server(_, target) => {
+                Some(target)
+            }
+            ReplicationMode::Target(target) => Some(target),
+            _ => None,
+        }
+    }
+
     fn on_insert(mut world: DeferredWorld, context: HookContext) {
         let entity = context.entity;
         let unsafe_world = world.as_unsafe_world_cell();
