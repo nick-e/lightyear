@@ -39,7 +39,7 @@ use lightyear_replication::registry::{ComponentError, ComponentKind, ComponentRe
 use lightyear_utils::ecs::{get_component_unchecked, get_component_unchecked_mut};
 #[cfg(feature = "metrics")]
 use std::sync::OnceLock;
-use tracing::{debug, error, trace, trace_span};
+use tracing::{debug, error, info, trace, trace_span};
 
 /// Metric key for component confirmations not checked because their tick is not in the local past.
 ///
@@ -447,6 +447,12 @@ impl PredictionRegistry {
         should_rollback_fn(this, that)
     }
 
+    /// Whether the confirmed and predicted states of `C` disagree enough to roll back.
+    ///
+    /// Every `true` also emits an info event named `prediction_mismatch_detected`, so a
+    /// capture can name the component behind each rollback. The event lives here rather than in
+    /// a component's own condition because visual correction calls [`Self::should_rollback`]
+    /// every frame, and this function runs only for a rollback decision.
     pub fn should_rollback_check<C: SyncComponent>(
         &self,
         confirmed: Option<&C>,
@@ -457,6 +463,13 @@ impl PredictionRegistry {
             (Some(c), Some(p)) => {
                 let should = self.should_rollback(c, p);
                 if should {
+                    info!(
+                        event = "prediction_mismatch_detected",
+                        component = core::any::type_name::<C>(),
+                        reason = "value_mismatch",
+                        confirmed = ?c,
+                        predicted = ?p,
+                    );
                     debug!(
                         "Should Rollback! Confirmed value {c:?} is different from predicted value {p:?} on entity {entity}",
                     );
@@ -477,6 +490,12 @@ impl PredictionRegistry {
                 should
             }
             (Some(c), None) => {
+                info!(
+                    event = "prediction_mismatch_detected",
+                    component = core::any::type_name::<C>(),
+                    reason = "missing_on_predicted",
+                    confirmed = ?c,
+                );
                 debug!(
                     "Should Rollback! Confirmed component exists ({c:?}), but predicted value does not exist on entity {entity}",
                 );
@@ -495,6 +514,12 @@ impl PredictionRegistry {
                 true
             }
             (None, Some(p)) => {
+                info!(
+                    event = "prediction_mismatch_detected",
+                    component = core::any::type_name::<C>(),
+                    reason = "missing_on_confirmed",
+                    predicted = ?p,
+                );
                 debug!(
                     "Should Rollback! Confirmed component does not exist, but predicted value exists ({p:?}) on entity {entity}",
                 );
