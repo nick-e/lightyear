@@ -712,7 +712,7 @@ fn input_history_depth(
 /// - we apply the TickUpdateEvents (from doing sync) during PostUpdate, which might affect the ticks from the InputMessages.
 ///   During this phase, we want to update the tick of the InputMessages that we wrote during FixedPostUpdate.
 #[derive(Debug, Resource)]
-pub(crate) struct MessageBuffer<S>(Vec<InputMessage<S>>);
+pub(crate) struct MessageBuffer<S>(pub(crate) Vec<InputMessage<S>>);
 
 impl<A> Default for MessageBuffer<A> {
     fn default() -> Self {
@@ -744,6 +744,7 @@ fn prepare_input_message<S: ActionStateSequence>(
     >,
     real_time: Res<Time<Real>>,
     mut send_timer: Local<Option<Timer>>,
+    mut last_host_client_tick: Local<Option<Tick>>,
 ) {
     let Some(route) = InputRoute::from_topology(&metadata.mode) else {
         return;
@@ -752,9 +753,17 @@ fn prepare_input_message<S: ActionStateSequence>(
         return;
     }
     let is_host_client = route.is_host_client();
+    let current_tick = timeline.current_tick();
 
-    // Only prepare input every send-interval.
-    if !input_config.send_interval.is_zero() {
+    if is_host_client {
+        // A host-client prepares each new tick at once rather than every send-interval, so
+        // the server forwards its input in the frame that sends the state it produced.
+        if *last_host_client_tick == Some(current_tick) {
+            return;
+        }
+        *last_host_client_tick = Some(current_tick);
+    } else if !input_config.send_interval.is_zero() {
+        // Only prepare input every send-interval.
         let timer = send_timer
             .get_or_insert_with(|| Timer::new(input_config.send_interval, TimerMode::Repeating));
         timer.tick(real_time.delta());
@@ -770,7 +779,6 @@ fn prepare_input_message<S: ActionStateSequence>(
     }
 
     // we send a message from the latest tick that we have available, which is the delayed tick
-    let current_tick = timeline.current_tick();
     let tick = current_tick + timeline.input_delay() as i32;
     // TODO: the number of messages should be in SharedConfig
     trace!(delayed_tick = ?tick, ?current_tick, "prepare_input_message");

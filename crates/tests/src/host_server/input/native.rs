@@ -1,6 +1,7 @@
 use crate::protocol::NativeInput as MyInput;
 use crate::stepper::*;
 use bevy_replicon::shared::server_entity_map::ServerEntityMap;
+use lightyear::input::config::InputConfig;
 use lightyear::input::native::prelude::{InputMarker, NativeBuffer};
 use lightyear::prelude::input::native::ActionState;
 use lightyear_connection::network_target::NetworkTarget;
@@ -178,6 +179,12 @@ fn test_host_client_inputers_replicated_to_remote_client() {
         .expect("entity was not replicated to client");
 
     // TEST
+    // the host-client sends each new tick at once, whatever its send interval
+    stepper
+        .server_app
+        .world_mut()
+        .resource_mut::<InputConfig<MyInput>>()
+        .send_interval = TICK_DURATION * 4;
     stepper
         .server_app
         .world_mut()
@@ -188,12 +195,11 @@ fn test_host_client_inputers_replicated_to_remote_client() {
     stepper.frame_step(1);
     let server_tick = stepper.server_tick();
     info!("Set input at server tick {server_tick:?}");
-    // by this point, the host-client has sent-local an InputMessage to the Server
+    // by this point, the server has rebroadcast the host-client's InputMessage, in the same
+    // frame that sent the state it produced
 
-    // second frame step so that the client receives the server's rebroadcasted input
-    // frame 1: server receives the InputMessage and rebroadcasts
-    // frame 2: client receives the InputMessage and adds to InputBuffer
-    stepper.frame_step(2);
+    // the client receives the rebroadcast input and adds it to the InputBuffer
+    stepper.frame_step(1);
 
     // Client send an InputMessage to the server, who then adds an InputBuffer.
     assert_eq!(

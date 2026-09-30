@@ -27,6 +27,8 @@ use bevy_utils::prelude::DebugName;
 use core::fmt::{Debug, Formatter};
 use core::time::Duration;
 use lightyear_connection::client::Connected;
+#[cfg(all(feature = "client", feature = "prediction"))]
+use lightyear_connection::host::HostClient;
 use lightyear_connection::host::HostServer;
 use lightyear_connection::identity::is_server;
 use lightyear_connection::prelude::NetworkTarget;
@@ -291,6 +293,15 @@ impl<S: ActionStateSequence + MapEntities> Plugin for ServerInputPlugin<S> {
             PreUpdate,
             receive_input_message::<S>.in_set(InputSystems::ReceiveInputs),
         );
+        // Between the host-client staging its messages and sending them over the
+        // local link, which drains the buffer.
+        #[cfg(all(feature = "client", feature = "prediction"))]
+        app.add_systems(
+            bevy_app::PostUpdate,
+            rebroadcast_host_client_input_messages::<S>
+                .after(crate::client::InputSystems::PrepareInputMessage)
+                .before(crate::client::InputSystems::SendInputMessage),
+        );
         app.add_systems(
             FixedPreUpdate,
             update_action_state::<S>.in_set(InputSystems::UpdateActionState),
@@ -394,68 +405,40 @@ fn receive_input_message<S: ActionStateSequence>(
                 commands.entity(client_entity).insert(interpolation_delay);
             }
 
+            // Only rebroadcast if the message is not already a rebroadcast. The
+            // host-client's own messages were forwarded in the frame they were
+            // staged, by `rebroadcast_host_client_input_messages`.
             #[cfg(feature = "prediction")]
-            if config.rebroadcast_inputs && let Ok(server) = server.get(server_entity) {
-                // only rebroadcast if the message is not already a rebroadcast
-                if !message.rebroadcast {
-                    // Resolve PreSpawned targets to server entities before rebroadcasting,
-                    // so that other clients can resolve them via normal entity mapping.
-                    for input in message.inputs.iter_mut() {
-                        if let InputTarget::PreSpawned(hash) = input.target
-                            && let Some(server_e) = resolve_prespawned_target(
-                                prespawned.iter().map(|(e, p)| (e, p.hash, p.receiver)),
-                                hash,
-                                None,
-                            )
-                        {
-                            input.target = InputTarget::Entity(server_e);
-                        }
-                    }
-                    debug!(action = ?DebugName::type_name::<S>().shortname(), "Rebroadcast input message {message:?} from client {client_id:?} with rebroadcaster {rebroadcaster:?}");
-                    message.rebroadcast = true;
-                    trace!(
-                        target: "lightyear_debug::input",
-                        kind = "server_input_rebroadcast",
-                        schedule = "PreUpdate",
-                        sample_point = "PreUpdate",
-                        entity = ?client_entity,
-                        server_entity = ?server_entity,
-                        client_id = ?client_id.0,
-                        action = ?DebugName::type_name::<S::Action>(),
-                        local_tick = tick.0,
-                        end_tick = message.end_tick.0,
-                        rebroadcaster = ?rebroadcaster,
-                        num_targets = message.inputs.len(),
-                        "server rebroadcasting input message"
-                    );
-                    match rebroadcaster {
-                        None => {
-                            sender.send::<_, InputChannel>(
-                                &message,
-                                server,
-                                &NetworkTarget::AllExceptSingle(client_id.0)
-                            )?;
-                        }
-                        Some(InputRebroadcaster::Room(room)) => {
-                            let targets: bevy_ecs::entity::EntityHashSet = rooms_query.iter()
-                                .filter(|(e, rooms)| *e != client_entity && rooms.contains_room(*room))
-                                .map(|(e, _)| e)
-                                .collect();
-                            sender.send_to_entities::<_, InputChannel>(
-                                &message,
-                                &targets
-                            )?;
-                        },
-                        Some(InputRebroadcaster::Target(target)) => {
-                            sender.send::<_, InputChannel>(
-                                &message,
-                                server,
-                                target
-                            )?;
-                        }
-                        Some(InputRebroadcaster::Marker(_)) => unreachable!()
-                    }
-                }
+            if config.rebroadcast_inputs
+                && !message.rebroadcast
+                && !client_id.is_local()
+                && let Ok(server) = server.get(server_entity)
+            {
+                trace!(
+                    target: "lightyear_debug::input",
+                    kind = "server_input_rebroadcast",
+                    schedule = "PreUpdate",
+                    sample_point = "PreUpdate",
+                    entity = ?client_entity,
+                    server_entity = ?server_entity,
+                    client_id = ?client_id.0,
+                    action = ?DebugName::type_name::<S::Action>(),
+                    local_tick = tick.0,
+                    end_tick = message.end_tick.0,
+                    rebroadcaster = ?rebroadcaster,
+                    num_targets = message.inputs.len(),
+                    "server rebroadcasting input message"
+                );
+                rebroadcast_input_message(
+                    &mut message,
+                    server,
+                    client_entity,
+                    client_id,
+                    rebroadcaster,
+                    &mut sender,
+                    &rooms_query,
+                    &prespawned,
+                )?;
             }
 
             for data in message.inputs {
@@ -636,6 +619,121 @@ fn receive_input_message<S: ActionStateSequence>(
             Ok(())
         })
     })
+}
+
+/// Forwards the host-client's input messages to the other clients in the frame
+/// they are staged.
+///
+/// The local link delivers them to [`receive_input_message`] a frame later,
+/// after the state they produced has been sent. A client that predicts the
+/// host-client's entity would then roll back from that state, and again from
+/// the input.
+#[cfg(all(feature = "client", feature = "prediction"))]
+fn rebroadcast_host_client_input_messages<S: ActionStateSequence>(
+    config: Res<InputConfig<S::Action>>,
+    // Absent in an app that adds no client input plugin.
+    message_buffer: Option<Res<crate::client::MessageBuffer<S>>>,
+    server: Query<&Endpoint>,
+    mut sender: ServerMultiMessageSender<With<Connected>>,
+    rooms_query: Query<(Entity, &Rooms), With<Connected>>,
+    host_client: Query<
+        (
+            Entity,
+            &LinkOf,
+            &RemoteId,
+            Option<&InputRebroadcaster<S::Action>>,
+        ),
+        (With<HostClient>, With<Connected>),
+    >,
+    prespawned: Query<
+        (Entity, &PreSpawned),
+        (
+            With<<S::State as ActionStateQueryData>::Main>,
+            With<InputBuffer<S::Snapshot, S::Action>>,
+        ),
+    >,
+) -> Result {
+    let Some(message_buffer) = message_buffer.filter(|_| config.rebroadcast_inputs) else {
+        return Ok(());
+    };
+    let Ok((client_entity, link_of, client_id, rebroadcaster)) = host_client.single() else {
+        return Ok(());
+    };
+    let Ok(server) = server.get(link_of.endpoint) else {
+        return Ok(());
+    };
+    for message in &message_buffer.0 {
+        let mut message = message.clone();
+        rebroadcast_input_message(
+            &mut message,
+            server,
+            client_entity,
+            client_id,
+            rebroadcaster,
+            &mut sender,
+            &rooms_query,
+            &prespawned,
+        )?;
+    }
+    Ok(())
+}
+
+/// Sends one client's input message to the other clients its rebroadcaster
+/// names, marked as a rebroadcast.
+#[cfg(feature = "prediction")]
+fn rebroadcast_input_message<S: ActionStateSequence>(
+    message: &mut InputMessage<S>,
+    server: &Endpoint,
+    client_entity: Entity,
+    client_id: &RemoteId,
+    rebroadcaster: Option<&InputRebroadcaster<S::Action>>,
+    sender: &mut ServerMultiMessageSender<With<Connected>>,
+    rooms_query: &Query<(Entity, &Rooms), With<Connected>>,
+    prespawned: &Query<
+        (Entity, &PreSpawned),
+        (
+            With<<S::State as ActionStateQueryData>::Main>,
+            With<InputBuffer<S::Snapshot, S::Action>>,
+        ),
+    >,
+) -> Result {
+    // Resolve PreSpawned targets to server entities before rebroadcasting,
+    // so that other clients can resolve them via normal entity mapping.
+    for input in message.inputs.iter_mut() {
+        if let InputTarget::PreSpawned(hash) = input.target
+            && let Some(server_e) = resolve_prespawned_target(
+                prespawned.iter().map(|(e, p)| (e, p.hash, p.receiver)),
+                hash,
+                None,
+            )
+        {
+            input.target = InputTarget::Entity(server_e);
+        }
+    }
+    debug!(action = ?DebugName::type_name::<S>().shortname(), "Rebroadcast input message {message:?} from client {client_id:?} with rebroadcaster {rebroadcaster:?}");
+    message.rebroadcast = true;
+    match rebroadcaster {
+        None => {
+            sender.send::<_, InputChannel>(
+                &*message,
+                server,
+                &NetworkTarget::AllExceptSingle(client_id.0),
+            )?;
+        }
+        Some(InputRebroadcaster::Room(room)) => {
+            let targets: bevy_ecs::entity::EntityHashSet = rooms_query
+                .iter()
+                .filter(|(e, rooms)| *e != client_entity && rooms.contains_room(*room))
+                .map(|(e, _)| e)
+                .collect();
+            sender.send_to_entities::<_, InputChannel>(&*message, &targets)?;
+        }
+        Some(InputRebroadcaster::Target(target)) => {
+            sender.send::<_, InputChannel>(&*message, server, target)?;
+        }
+        Some(InputRebroadcaster::Marker(_)) => unreachable!(),
+    }
+    Ok(())
 }
 
 fn detect_input_history_rewrite<S: ActionStateSequence>(
