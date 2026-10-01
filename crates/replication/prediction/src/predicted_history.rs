@@ -21,6 +21,7 @@ use bevy_replicon::shared::replication::storage::ReplicationStorage;
 use bevy_utils::prelude::DebugName;
 use core::fmt::{self, Debug, Display};
 use core::ops::{Deref, DerefMut};
+use lightyear_connection::network_topology::{NetworkTopology, NetworkingMetadata};
 use lightyear_core::history_buffer::{HistoryBuffer, HistoryState};
 use lightyear_core::prelude::{ConfirmedHistory, LocalTimeline};
 use lightyear_core::tick::Tick;
@@ -186,6 +187,48 @@ pub(crate) fn handle_local_timeline_shift_prediction_history<C: Component>(
             "shifted prediction history ticks"
         );
     }
+}
+
+/// Clears a component's prediction and confirmed histories after a conventional client's
+/// connection ends.
+///
+/// Their values belong to the session that ended, and some outlive it: a resource's history sits
+/// on the resource's entity, which no disconnect despawns, so a rollback early in the next
+/// session would restore the previous session's values. The topology tells this system when the
+/// connection ended rather than the removal of `Connected`, because a connection that ends in
+/// `PreUpdate` leaves the topology a client until `PostUpdate`, and the fixed steps in between
+/// still record history.
+pub(crate) fn clear_history_after_client_disconnect<C: Component>(
+    metadata: Option<Res<NetworkingMetadata>>,
+    mut client: Local<Option<Entity>>,
+    mut prediction_histories: Query<&mut PredictionHistory<C>>,
+    mut confirmed_histories: Query<&mut ConfirmedHistory<C>>,
+) {
+    let Some(metadata) = metadata.filter(|metadata| metadata.is_changed()) else {
+        return;
+    };
+    let current = match metadata.mode {
+        NetworkTopology::Client(entity) => Some(entity),
+        _ => None,
+    };
+    let previous = core::mem::replace(&mut *client, current);
+    if previous.is_none() || previous == current {
+        return;
+    }
+    for mut history in &mut prediction_histories {
+        history.clear();
+    }
+    for mut history in &mut confirmed_histories {
+        history.clear();
+    }
+    trace!(
+        target: "lightyear_debug::prediction",
+        kind = "prediction_history_cleared",
+        schedule = "PreUpdate",
+        sample_point = "PreUpdate",
+        component = ?DebugName::type_name::<C>(),
+        "cleared prediction history after the client connection ended"
+    );
 }
 
 pub(crate) fn handle_local_timeline_shift_history_diff_receiver<C: RepliconDiffable>(
@@ -757,6 +800,75 @@ mod tests {
             .get::<PredictionHistory<TestValue>>(entity)
             .unwrap();
         assert_eq!(history.get(Tick(0)), Some(&TestValue(2.0)));
+    }
+
+    #[derive(Resource, Clone, Debug, PartialEq)]
+    struct TestResource(u32);
+
+    #[test]
+    fn histories_clear_after_the_client_connection_ends() {
+        let mut app = App::new();
+        app.init_resource::<NetworkingMetadata>();
+        app.insert_resource(TestResource(0));
+        app.add_systems(
+            Update,
+            (
+                clear_history_after_client_disconnect::<TestValue>,
+                clear_history_after_client_disconnect::<TestResource>,
+            ),
+        );
+        let client = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<NetworkingMetadata>().mode = NetworkTopology::Client(client);
+        app.update();
+
+        let mut prediction = PredictionHistory::<TestValue>::default();
+        prediction.add_predicted(Tick(5), Some(TestValue(5.0)));
+        let mut confirmed = ConfirmedHistory::<TestValue>::default();
+        confirmed.insert_present(Tick(5), TestValue(5.0));
+        let entity = app.world_mut().spawn((prediction, confirmed)).id();
+        let resource_id = app.world().component_id::<TestResource>().unwrap();
+        let resource_entity = app.world().resource_entities().get(resource_id).unwrap();
+        let mut resource_history = PredictionHistory::<TestResource>::default();
+        resource_history.add_predicted(Tick(5), Some(TestResource(5)));
+        app.world_mut()
+            .entity_mut(resource_entity)
+            .insert(resource_history);
+
+        // A topology change that keeps the same client keeps the session's histories.
+        app.world_mut()
+            .resource_mut::<NetworkingMetadata>()
+            .set_changed();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<PredictionHistory<TestValue>>(entity)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        app.world_mut().resource_mut::<NetworkingMetadata>().mode = NetworkTopology::Undefined;
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<PredictionHistory<TestValue>>(entity)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            app.world()
+                .get::<ConfirmedHistory<TestValue>>(entity)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            app.world()
+                .get::<PredictionHistory<TestResource>>(resource_entity)
+                .unwrap()
+                .is_empty(),
+            "a resource's entity outlives the connection, and so would its history"
+        );
     }
 
     #[test]

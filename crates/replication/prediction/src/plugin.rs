@@ -6,7 +6,7 @@ use crate::manager::{LastConfirmedInput, PredictionManager};
 use crate::predicted_history::{
     PredictionHistory, add_history_diff_receiver, add_prediction_history,
     apply_component_removal_predicted, backfill_confirmed_history_on_predicted,
-    handle_local_timeline_shift_history_diff_receiver,
+    clear_history_after_client_disconnect, handle_local_timeline_shift_history_diff_receiver,
     handle_local_timeline_shift_prediction_history, prune_confirmed_history,
     prune_history_diff_receiver, snap_to_confirmed_during_rollback, update_prediction_history,
 };
@@ -166,6 +166,13 @@ pub fn add_non_networked_rollback_systems<C: Component<Mutability = Mutable> + C
         PostUpdate,
         prune_confirmed_history::<C>.in_set(PredictionSystems::All),
     );
+    // Not in `PredictionSystems::All`, which stops running when the connection ends.
+    app.add_systems(
+        PreUpdate,
+        clear_history_after_client_disconnect::<C>
+            .before(ReplicationSystems::Receive)
+            .before(RollbackSystems::Check),
+    );
 }
 
 /// Enables rollbacking a resource. As a rule of thumb, only use on resources
@@ -221,6 +228,13 @@ pub(crate) fn add_prediction_systems<C: SyncComponent>(app: &mut App) {
     app.add_systems(
         PostUpdate,
         prune_confirmed_history::<C>.in_set(PredictionSystems::All),
+    );
+    // Not in `PredictionSystems::All`, which stops running when the connection ends.
+    app.add_systems(
+        PreUpdate,
+        clear_history_after_client_disconnect::<C>
+            .before(ReplicationSystems::Receive)
+            .before(RollbackSystems::Check),
     );
 }
 
