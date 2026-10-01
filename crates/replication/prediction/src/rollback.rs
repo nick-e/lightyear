@@ -58,7 +58,7 @@ use lightyear_connection::network_topology::NetworkingMetadata;
 use lightyear_core::history_buffer::HistoryState;
 use lightyear_core::prelude::{ConfirmedHistory, LocalTimeline};
 use lightyear_core::tick::Tick;
-use lightyear_core::timeline::{Rollback, is_in_rollback};
+use lightyear_core::timeline::{LocalTimelineShift, Rollback, is_in_rollback};
 use lightyear_frame_interpolation::FrameInterpolationSystems;
 #[cfg(feature = "p2p")]
 use lightyear_p2p::prelude::{P2PStarted, P2PStopped};
@@ -141,6 +141,7 @@ impl Plugin for RollbackPlugin {
             app.add_observer(set_p2p_input_rollback_floor);
             app.add_observer(clear_p2p_input_rollback_floor);
         }
+        app.add_observer(shift_input_rollback_floor);
 
         // SETS
         app.configure_sets(
@@ -171,6 +172,7 @@ impl Plugin for RollbackPlugin {
                 reset_state_rollback_metadata_on_topology_change
                     .before(ReplicationSystems::Receive)
                     .before(RollbackSystems::Check),
+                reset_client_input_rollback_floor.before(RollbackSystems::Check),
                 check_received_replication_messages
                     .after(ClientSystems::ReceivePackets)
                     .before(ClientSystems::Receive),
@@ -188,6 +190,10 @@ impl Plugin for RollbackPlugin {
                     .in_set(PredictionSystems::All)
                     .run_if(not(is_in_rollback)),
             ),
+        );
+        app.add_systems(
+            FixedPostUpdate,
+            set_client_input_rollback_floor.in_set(PredictionSystems::UpdateHistory),
         );
     }
 }
@@ -218,6 +224,50 @@ fn clear_p2p_input_rollback_floor(
         return;
     };
     prediction_manager.input_rollback_floor = None;
+}
+
+/// Sets a conventional client's input rollback floor to the first tick it records history for.
+///
+/// Prediction history begins at the first tick simulated after the client's timeline
+/// synchronizes. An input rollback to an earlier tick finds no saved value for any component,
+/// so it leaves each one at its current value and replays the ticks in between on top of it.
+/// That rollback happens when another client's forwarded input covers ticks from before this
+/// client synchronized.
+fn set_client_input_rollback_floor(
+    metadata: Res<NetworkingMetadata>,
+    timeline: SyncedLocalTimeline,
+    mut prediction_manager: ResMut<PredictionManager>,
+) {
+    if metadata.mode.is_client() && prediction_manager.input_rollback_floor.is_none() {
+        prediction_manager.input_rollback_floor = Some(timeline.tick());
+    }
+}
+
+/// Removes the input rollback floor when the topology changes outside P2P, so that each
+/// connection of a conventional client sets its own. A P2P session sets and removes its floor
+/// itself.
+fn reset_client_input_rollback_floor(
+    metadata: Res<NetworkingMetadata>,
+    prediction_manager: Option<ResMut<PredictionManager>>,
+) {
+    if metadata.is_changed()
+        && !metadata.mode.is_p2p()
+        && let Some(mut prediction_manager) = prediction_manager
+    {
+        prediction_manager.input_rollback_floor = None;
+    }
+}
+
+/// Moves the input rollback floor with the local clock, as the histories it guards move.
+fn shift_input_rollback_floor(
+    trigger: On<LocalTimelineShift>,
+    prediction_manager: Option<ResMut<PredictionManager>>,
+) {
+    if let Some(mut prediction_manager) = prediction_manager
+        && let Some(floor) = prediction_manager.input_rollback_floor
+    {
+        prediction_manager.input_rollback_floor = Some(floor + trigger.delta);
+    }
 }
 
 #[derive(Component, PartialEq, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -384,7 +434,8 @@ fn check_rollback(
                             commands: &mut Commands,
                             rollback: Rollback| {
         // The P2P world does not exist before the snapshot immediately preceding its agreed first
-        // gameplay tick. This guard applies only to input-driven reconciliation: authoritative
+        // gameplay tick, and a conventional client has no history before its first synchronized
+        // tick. This guard applies only to input-driven reconciliation: authoritative
         // state and explicit forced rollbacks retain their existing behavior because they may
         // provide their own restoration data.
         if matches!(rollback, Rollback::FromInputs)
@@ -394,7 +445,7 @@ fn check_rollback(
             debug!(
                 ?rollback_tick,
                 ?input_rollback_floor,
-                "Ignoring input rollback from before the P2P session boundary"
+                "Ignoring input rollback from before the input rollback floor"
             );
             trace!(
                 target: "lightyear_debug::prediction",
@@ -1367,7 +1418,9 @@ pub struct CatchUpGated;
 mod tests {
     use super::*;
     use bevy_ecs::system::RunSystemOnce;
+    use lightyear_connection::network_topology::NetworkTopology;
     use lightyear_core::prelude::FrameInterpolationHistory;
+    use lightyear_sync::prelude::LocalTimelineSync;
 
     #[derive(Component, Clone, PartialEq, Debug)]
     struct TestComponent(f32);
@@ -1434,6 +1487,75 @@ mod tests {
                 .resource::<PredictionManager>()
                 .input_rollback_is_allowed(Tick(9))
         );
+    }
+
+    fn input_rollback_floor(app: &App) -> Option<Tick> {
+        app.world()
+            .resource::<PredictionManager>()
+            .input_rollback_floor
+    }
+
+    #[test]
+    fn client_input_rollback_floor_is_its_first_history_tick() {
+        let mut app = App::new();
+        app.init_resource::<NetworkingMetadata>();
+        app.init_resource::<LocalTimeline>();
+        app.init_resource::<LocalTimelineSync>();
+        app.insert_resource(PredictionManager::default());
+        app.add_observer(shift_input_rollback_floor);
+        app.add_systems(
+            Update,
+            (
+                reset_client_input_rollback_floor,
+                set_client_input_rollback_floor,
+            )
+                .chain(),
+        );
+        let client = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<NetworkingMetadata>().mode = NetworkTopology::Client(client);
+        app.world_mut()
+            .resource_mut::<LocalTimeline>()
+            .apply_delta(40);
+
+        // A client records no history before its timeline synchronizes.
+        app.update();
+        assert_eq!(input_rollback_floor(&app), None);
+
+        app.world_mut()
+            .resource_mut::<LocalTimelineSync>()
+            .set_synced(true);
+        app.update();
+        assert_eq!(input_rollback_floor(&app), Some(Tick(40)));
+        assert!(
+            !app.world()
+                .resource::<PredictionManager>()
+                .input_rollback_is_allowed(Tick(39))
+        );
+
+        // Later ticks keep the first one.
+        app.world_mut()
+            .resource_mut::<LocalTimeline>()
+            .apply_delta(5);
+        app.update();
+        assert_eq!(input_rollback_floor(&app), Some(Tick(40)));
+
+        // A resynchronization moves it with the clock.
+        app.world_mut().trigger(LocalTimelineShift { delta: 10 });
+        assert_eq!(input_rollback_floor(&app), Some(Tick(50)));
+
+        // The connection ending removes it.
+        app.world_mut().resource_mut::<NetworkingMetadata>().mode = NetworkTopology::Undefined;
+        app.update();
+        assert_eq!(input_rollback_floor(&app), None);
+
+        // A P2P topology keeps the floor its session sets.
+        app.world_mut()
+            .resource_mut::<PredictionManager>()
+            .input_rollback_floor = Some(Tick(9));
+        app.world_mut().resource_mut::<NetworkingMetadata>().mode =
+            NetworkTopology::P2P([client].into_iter().collect());
+        app.update();
+        assert_eq!(input_rollback_floor(&app), Some(Tick(9)));
     }
 
     /// Test that rollback does not remove a predicted component
