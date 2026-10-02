@@ -42,6 +42,7 @@ use avian3d::{
     prelude::*,
 };
 use bevy_app::{App, FixedPostUpdate, PreUpdate};
+use bevy_ecs::entity::EntityHashMap;
 use bevy_ecs::prelude::*;
 use bevy_time::Time;
 use lightyear_core::prelude::{LocalTimeline, Tick};
@@ -245,7 +246,7 @@ fn restore_collider_broad_phase(
         .restore_into(&mut trees, &mut moved_proxies);
 }
 
-/// Re-registers Avian [`Collider`]s whose [`ColliderTreeProxyKey`]s are invalid.
+/// Re-registers Avian [`Collider`]s whose [`ColliderTreeProxyKey`]s are invalid or missing.
 ///
 /// Avian's [`ColliderTreePlugin`] registers [`ColliderTreeProxyKey`] as a required component of
 /// [`Collider`] at runtime, defaulted to `PLACEHOLDER`, and an observer on `Insert<Collider>`
@@ -256,11 +257,14 @@ fn restore_collider_broad_phase(
 /// - Identifying a non-existant entry or another collider's entry when no value was saved.
 /// - Identifying an entry that records a body other than the collider's current one, or a tree
 ///   the collider's current body does not belong to.
+/// - Missing, when the value saved for that tick is the removal [`seed_collider_history_absence`]
+///   writes ahead of the first recorded key. The rollback removes the key and both AABBs, and
+///   Avian registers a collider only when its `Collider` or `ColliderOf` is inserted.
 fn reregister_invalid_proxies(
     colliders: Query<
         (
             Entity,
-            &ColliderTreeProxyKey,
+            Option<&ColliderTreeProxyKey>,
             &Collider,
             Option<&ColliderOf>,
         ),
@@ -270,10 +274,28 @@ fn reregister_invalid_proxies(
     trees: Res<ColliderTrees>,
     mut commands: Commands,
 ) {
+    let mut entries = None;
     for (entity, proxy_key, collider, collider_of) in &colliders {
         // The purpose of re-inserting `collider` is to re-trigger Avian's observer that sets a
         // collider's proxy key to a valid value and correctly registers the collider with the
         // collider tree.
+
+        let Some(proxy_key) = proxy_key else {
+            // The restored trees can still hold an entry for a collider without a key, for example
+            // when no trees were saved at or before the rollback tick and the live ones were kept.
+            // Avian finds a collider's old entry only through its key, so the key to that entry
+            // goes back with the re-insert, and Avian removes the entry rather than leaving it
+            // behind.
+            let proxy_key = entries
+                .get_or_insert_with(|| collider_entries(&trees))
+                .get(&entity)
+                .copied()
+                .unwrap_or(ColliderTreeProxyKey::PLACEHOLDER);
+            commands
+                .entity(entity)
+                .insert((proxy_key, collider.clone()));
+            continue;
+        };
 
         // Ensure the proxy key identifies a collider-tree entry.
         if *proxy_key == ColliderTreeProxyKey::PLACEHOLDER {
@@ -298,20 +320,33 @@ fn reregister_invalid_proxies(
             continue;
         };
 
-        // Ensure the proxy key references the collider's current body.
-        let body = collider_of.map(|of| of.body);
-        if proxy.body != body {
-            commands.entity(entity).insert(collider.clone());
-            continue;
-        }
+        // Ensure the entry records the collider's current body, in the tree that body belongs to.
 
-        // Ensure proxy key references the tree that the collider belongs to.
+        // The collider's body, and the tree that body belongs to or a standalone tree if the
+        // collider does not belong to a body.
+        let body = collider_of.map(|of| of.body);
         let tree =
             ColliderTreeType::from_body(body.and_then(|body| bodies.get(body).ok()).copied());
-        if proxy_key.tree_type() != tree {
+        if proxy.body != body || proxy_key.tree_type() != tree {
+            // The entry records the body the collider had at the rollback tick, or the tree that
+            // body belonged to then, rather than its current body and tree.
             commands.entity(entity).insert(collider.clone());
         }
     }
+}
+
+/// The key to every entry in `trees`, by the collider the entry holds.
+fn collider_entries(trees: &ColliderTrees) -> EntityHashMap<ColliderTreeProxyKey> {
+    let mut entries = EntityHashMap::default();
+    for tree_type in ColliderTreeType::ALL {
+        for (index, proxy) in trees.tree_for_type(tree_type).proxies.iter() {
+            entries.insert(
+                proxy.collider,
+                ColliderTreeProxyKey::new(ProxyId::new(index as u32), tree_type),
+            );
+        }
+    }
+    entries
 }
 
 /// Registers persistent island state after Avian has finished installing its optional plugins.
@@ -369,7 +404,8 @@ fn add_collider_rollback_histories(
 /// `restore_collider_broad_phase` rewinds the tree to a snapshot that has no such proxy, and
 /// `update_moved_collider_aabbs` then indexes a slot that does not exist. Writing an explicit
 /// removal ahead of the first recorded value gives that rollback something true to restore: the
-/// components are stripped, and Avian re-registers the collider during replay.
+/// components are stripped, and `reregister_invalid_proxies` registers the collider again before
+/// replay.
 ///
 /// The seed is placed further back than any rollback can target. A deeper tick is safe because
 /// `HistoryBuffer::clear_until_tick` keeps the newest entry at or before the horizon and relabels
@@ -909,6 +945,82 @@ mod tests {
         assert_eq!(proxy_body(&app, collider), Some(body_b));
     }
 
+    /// Tests that a collider whose [`ColliderTreeProxyKey`] a rollback removed is registered again
+    /// in place of the entry the restored trees still hold for it.
+    #[test]
+    fn restore_collider_whose_key_was_removed() {
+        let mut app = rollback_test_app();
+
+        // Spawn a collider, then save the collider trees, which hold its entry.
+        let collider = spawn_collider(&mut app);
+        app.world_mut()
+            .run_system_once(record_collider_broad_phase_for_rollback)
+            .unwrap();
+        let broad_phase = app.world().resource::<RollbackColliderBroadPhase>().clone();
+
+        // Perform a rollback which restores the collider trees and the removal saved ahead of the
+        // collider's first recorded key and AABBs.
+        app.insert_resource(broad_phase);
+        app.world_mut()
+            .run_system_once(restore_collider_broad_phase)
+            .unwrap();
+        app.world_mut()
+            .entity_mut(collider)
+            .remove::<(ColliderTreeProxyKey, ColliderAabb, EnlargedAabb)>();
+
+        // `reregister_invalid_proxies()` should register `collider` again.
+        app.world_mut()
+            .run_system_once(reregister_invalid_proxies)
+            .unwrap();
+
+        // Move `collider`, so Avian updates the entry its key identifies.
+        app.world_mut().get_mut::<Position>(collider).unwrap().0 += Vector::X;
+        app.update();
+
+        assert!(owns_its_proxy(&app, collider));
+        assert_eq!(
+            entries_of(&app, collider),
+            1,
+            "the trees still hold the entry the rollback restored"
+        );
+    }
+
+    /// Tests that a collider whose [`ColliderTreeProxyKey`] a rollback removed is registered with
+    /// the restored trees when they hold no entry for it.
+    #[test]
+    fn restore_newly_created_collider_whose_key_was_removed() {
+        let mut app = rollback_test_app();
+
+        // Save the collider trees, then spawn a collider, which they do not contain.
+        app.world_mut()
+            .run_system_once(record_collider_broad_phase_for_rollback)
+            .unwrap();
+        let broad_phase = app.world().resource::<RollbackColliderBroadPhase>().clone();
+        let collider = spawn_collider(&mut app);
+
+        // Perform a rollback which restores the collider trees and the removal saved ahead of the
+        // collider's first recorded key and AABBs.
+        app.insert_resource(broad_phase);
+        app.world_mut()
+            .run_system_once(restore_collider_broad_phase)
+            .unwrap();
+        app.world_mut()
+            .entity_mut(collider)
+            .remove::<(ColliderTreeProxyKey, ColliderAabb, EnlargedAabb)>();
+
+        // `reregister_invalid_proxies()` should register `collider` with the restored trees.
+        app.world_mut()
+            .run_system_once(reregister_invalid_proxies)
+            .unwrap();
+
+        // Move `collider`, so Avian updates the entry its key identifies.
+        app.world_mut().get_mut::<Position>(collider).unwrap().0 += Vector::X;
+        app.update();
+
+        assert!(owns_its_proxy(&app, collider));
+        assert_eq!(entries_of(&app, collider), 1);
+    }
+
     fn rollback_test_app() -> App {
         let mut app = App::new();
         app.add_plugins((
@@ -961,6 +1073,16 @@ mod tests {
             .resource::<ColliderTrees>()
             .get_proxy(key)
             .is_some_and(|proxy| proxy.collider == collider)
+    }
+
+    /// Returns how many entries `app`'s collider trees hold for `collider`.
+    fn entries_of(app: &App, collider: Entity) -> usize {
+        app.world()
+            .resource::<ColliderTrees>()
+            .iter_trees()
+            .flat_map(|tree| tree.proxies.iter())
+            .filter(|(_, proxy)| proxy.collider == collider)
+            .count()
     }
 
     /// Returns the [`ColliderTreeType`] of that contains `collider`.
